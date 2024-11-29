@@ -142,7 +142,7 @@ int main(int argc, char *argv[]) {
                 break;
             case 's':
                 stack_size_given = 1;
-                if (sscanf(optarg, "%zu", &stack_size) != 1 || stack_size < PTHREAD_STACK_MIN) {
+                if (sscanf(optarg, "%zu", &stack_size) != 1 || stack_size < (size_t)PTHREAD_STACK_MIN) {
                     fprintf(stderr, "Invalid stack size: %s. Must be at least %ld bytes.\n", optarg, PTHREAD_STACK_MIN);
                     print_usage(argv[0]);
                     exit(EXIT_FAILURE);
