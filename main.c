@@ -135,6 +135,15 @@ void print_usage(const char *program_name) {
     printf("  -h, --help                                Show this help message\n");
 }
 
+void setup_signal_handler() {
+    // Set up signal handler for SIGINT
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+}
+
 void parse_arguments(int *argc, char **argv[]) {
     int opt;
     int option_index = 0;
@@ -216,6 +225,8 @@ void parse_arguments(int *argc, char **argv[]) {
 
 int main(int argc, char *argv[]) {
 
+    setup_signal_handler();
+
     parse_arguments(&argc, &argv);
 
     pthread_t threads[num_threads];
@@ -228,13 +239,6 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error setting stack size (%zu bytes). Using system default stack size.\n", stack_size);
         }
     }
-
-    // Set up signal handler for SIGINT
-    struct sigaction sa;
-    sa.sa_handler = handle_sigint;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGINT, &sa, NULL);
 
     // Create threads
     for (long i = 0; i < num_threads; i++) {
