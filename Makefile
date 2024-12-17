@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -pthread
+CFLAGS = -Wall -Wextra -Werror -std=c99 -pthread
 TARGET = glibcVSZPlayground
 
 all: $(TARGET)
