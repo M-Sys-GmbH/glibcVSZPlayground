@@ -27,6 +27,32 @@ void handle_sigint(int sig) {
     running = 0;
 }
 
+int malloc_function(void*** allocated_memory, long thread_id, char *output_buffer, int *offset) {
+    *allocated_memory = malloc(malloc_count * sizeof(void*));
+    if (*allocated_memory == NULL) {
+        fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
+        return -1;
+    }
+
+    for (int i = 0; i < malloc_count; i++) {
+        (*allocated_memory)[i] = malloc(malloc_size);
+        if ((*allocated_memory)[i] != NULL) {
+            if (malloc_fill_enabled) {
+                memset((*allocated_memory)[i], 0xAA, malloc_size);
+            }
+            void *malloc_end_addr = (void *)((char *)(*allocated_memory)[i] + malloc_size);
+            *offset += snprintf(output_buffer + *offset, sizeof(output_buffer) - *offset,
+                               "\tAllocated %zu bytes at address %p to %p\n",
+                               malloc_size, (*allocated_memory)[i], malloc_end_addr);
+        } else {
+            *offset += snprintf(output_buffer + *offset, sizeof(output_buffer) - *offset,
+                               "Thread %ld failed to allocate %zu bytes on malloc %d\n",
+                               thread_id, malloc_size, i);
+        }
+    }
+    return 0;
+}
+
 void* thread_function(void* arg) {
     long thread_id = (long)arg;
     pthread_t self = pthread_self();
@@ -58,27 +84,9 @@ void* thread_function(void* arg) {
                        thread_id, tid, stack_addr, stack_end_addr, stack_size);
 
     if (malloc_enabled) {
-        allocated_memory = malloc(malloc_count * sizeof(void*));
-        if (allocated_memory == NULL) {
+        if (malloc_function(&allocated_memory, thread_id, output_buffer, &offset)) {
             fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
             return NULL;
-        }
-
-        for (int i = 0; i < malloc_count; i++) {
-            allocated_memory[i] = malloc(malloc_size);
-            if (allocated_memory[i] != NULL) {
-                if (malloc_fill_enabled) {
-                    memset(allocated_memory[i], 0xAA, malloc_size);
-                }
-                void *malloc_end_addr = (void *)((char *)allocated_memory[i] + malloc_size);
-                offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
-                                   "\tAllocated %zu bytes at address %p to %p\n",
-                                   malloc_size, allocated_memory[i], malloc_end_addr);
-            } else {
-                offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
-                                   "Thread %ld failed to allocate %zu bytes on malloc %d\n",
-                                   thread_id, malloc_size, i);
-            }
         }
     }
 
