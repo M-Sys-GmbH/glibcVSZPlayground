@@ -27,7 +27,25 @@ void handle_sigint(int sig) {
     running = 0;
 }
 
-int malloc_function(void*** allocated_memory, long thread_id, char *output_buffer, int *offset) {
+int get_stack_info(void **stack_addr, size_t *stack_size, void **stack_end_addr) {
+    pthread_t self = pthread_self();
+    pthread_attr_t attr;
+
+    int ret = pthread_getattr_np(self, &attr);
+    if (ret != 0) {
+        perror("pthread_getattr_np");
+        return -1;
+    }
+
+    pthread_attr_getstack(&attr, &*stack_addr, &*stack_size);
+    pthread_attr_destroy(&attr);
+
+    *stack_end_addr = (void *)((char *)(*stack_addr) + *(stack_size));
+
+    return 0;
+}
+
+int malloc_allocate_function(void*** allocated_memory, long thread_id, char *output_buffer, int *offset) {
     *allocated_memory = malloc(malloc_count * sizeof(void*));
     if (*allocated_memory == NULL) {
         fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
@@ -53,39 +71,38 @@ int malloc_function(void*** allocated_memory, long thread_id, char *output_buffe
     return 0;
 }
 
+void malloc_deallocate_function(void ***allocated_memory) {
+    for (int i = 0; i < malloc_count; i++) {
+         if ((*allocated_memory)[i] != NULL) {
+             free((*allocated_memory)[i]);
+         }
+     }
+     free(*allocated_memory);
+}
+
 void* thread_function(void* arg) {
-    long thread_id = (long)arg;
-    pthread_t self = pthread_self();
-    pid_t tid = syscall(SYS_gettid);
-
-    // Get stack attributes
-    pthread_attr_t attr;
-    void *stack_addr;
-    size_t stack_size;
-
-    int ret = pthread_getattr_np(self, &attr);
-    if (ret != 0) {
-        perror("pthread_getattr_np");
-        return NULL;
-    }
-
-    pthread_attr_getstack(&attr, &stack_addr, &stack_size);
-    pthread_attr_destroy(&attr);
-
-    // Calculate the last address of the stack
-    void *stack_end_addr = (void *)((char *)stack_addr + stack_size);
-
-    void **allocated_memory = NULL;
     char output_buffer[4096];
     int offset = 0;
+
+    long thread_id = (long)arg;
+    pid_t tid = syscall(SYS_gettid);
+
+    void *stack_addr = NULL;
+    size_t stack_size;
+    void *stack_end_addr = NULL;
+
+    void **allocated_memory = NULL;
+
+    if (get_stack_info(&stack_addr, &stack_size, &stack_end_addr) != 0) {
+        return NULL;
+    }
 
     offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
                        "Thread %ld started. TID: %d, Stack Address: %p, Stack End Address: %p, Stack Size: %zu bytes\n",
                        thread_id, tid, stack_addr, stack_end_addr, stack_size);
 
     if (malloc_enabled) {
-        if (malloc_function(&allocated_memory, thread_id, output_buffer, &offset)) {
-            fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
+        if (malloc_allocate_function(&allocated_memory, thread_id, output_buffer, &offset)) {
             return NULL;
         }
     }
@@ -98,12 +115,7 @@ void* thread_function(void* arg) {
     }
 
     if (allocated_memory != NULL) {
-        for (int i = 0; i < malloc_count; i++) {
-            if (allocated_memory[i] != NULL) {
-                free(allocated_memory[i]);
-            }
-        }
-        free(allocated_memory);
+        malloc_deallocate_function(&allocated_memory);
     }
 
     return NULL;
