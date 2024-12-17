@@ -20,6 +20,9 @@ int malloc_fill_enabled = 0;
 size_t malloc_size = 0;
 int stack_size_given = 0;
 int malloc_count = DEFAULT_MALLOC_COUNT;
+int num_threads = DEFAULT_NUM_THREADS;
+size_t stack_size = 0;
+
 
 // Signal handler to handle Ctrl+C (SIGINT)
 void handle_sigint(int sig) {
@@ -27,58 +30,83 @@ void handle_sigint(int sig) {
     running = 0;
 }
 
-void* thread_function(void* arg) {
-    long thread_id = (long)arg;
+int get_stack_info(void **stack_addr, size_t *stack_size, void **stack_end_addr) {
     pthread_t self = pthread_self();
-    pid_t tid = syscall(SYS_gettid);
-
-    // Get stack attributes
     pthread_attr_t attr;
-    void *stack_addr;
-    size_t stack_size;
 
     int ret = pthread_getattr_np(self, &attr);
     if (ret != 0) {
         perror("pthread_getattr_np");
-        return NULL;
+        return -1;
     }
 
-    pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+    pthread_attr_getstack(&attr, &*stack_addr, &*stack_size);
     pthread_attr_destroy(&attr);
 
-    // Calculate the last address of the stack
-    void *stack_end_addr = (void *)((char *)stack_addr + stack_size);
+    *stack_end_addr = (void *)((char *)(*stack_addr) + *(stack_size));
 
-    void **allocated_memory = NULL;
+    return 0;
+}
+
+int malloc_allocate_function(void*** allocated_memory, long thread_id, char *output_buffer, int *offset) {
+    *allocated_memory = malloc(malloc_count * sizeof(void*));
+    if (*allocated_memory == NULL) {
+        fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
+        return -1;
+    }
+
+    for (int i = 0; i < malloc_count; i++) {
+        (*allocated_memory)[i] = malloc(malloc_size);
+        if ((*allocated_memory)[i] != NULL) {
+            if (malloc_fill_enabled) {
+                memset((*allocated_memory)[i], 0xAA, malloc_size);
+            }
+            void *malloc_end_addr = (void *)((char *)(*allocated_memory)[i] + malloc_size);
+            *offset += snprintf(output_buffer + *offset, sizeof(output_buffer) - *offset,
+                               "\tAllocated %zu bytes at address %p to %p\n",
+                               malloc_size, (*allocated_memory)[i], malloc_end_addr);
+        } else {
+            *offset += snprintf(output_buffer + *offset, sizeof(output_buffer) - *offset,
+                               "Thread %ld failed to allocate %zu bytes on malloc %d\n",
+                               thread_id, malloc_size, i);
+        }
+    }
+    return 0;
+}
+
+void malloc_deallocate_function(void ***allocated_memory) {
+    for (int i = 0; i < malloc_count; i++) {
+         if ((*allocated_memory)[i] != NULL) {
+             free((*allocated_memory)[i]);
+         }
+     }
+     free(*allocated_memory);
+}
+
+void* thread_function(void* arg) {
     char output_buffer[4096];
     int offset = 0;
+
+    long thread_id = (long)arg;
+    pid_t tid = syscall(SYS_gettid);
+
+    void *stack_addr = NULL;
+    size_t stack_size;
+    void *stack_end_addr = NULL;
+
+    void **allocated_memory = NULL;
+
+    if (get_stack_info(&stack_addr, &stack_size, &stack_end_addr) != 0) {
+        return NULL;
+    }
 
     offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
                        "Thread %ld started. TID: %d, Stack Address: %p, Stack End Address: %p, Stack Size: %zu bytes\n",
                        thread_id, tid, stack_addr, stack_end_addr, stack_size);
 
     if (malloc_enabled) {
-        allocated_memory = malloc(malloc_count * sizeof(void*));
-        if (allocated_memory == NULL) {
-            fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
+        if (malloc_allocate_function(&allocated_memory, thread_id, output_buffer, &offset)) {
             return NULL;
-        }
-
-        for (int i = 0; i < malloc_count; i++) {
-            allocated_memory[i] = malloc(malloc_size);
-            if (allocated_memory[i] != NULL) {
-                if (malloc_fill_enabled) {
-                    memset(allocated_memory[i], 0xAA, malloc_size);
-                }
-                void *malloc_end_addr = (void *)((char *)allocated_memory[i] + malloc_size);
-                offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
-                                   "\tAllocated %zu bytes at address %p to %p\n",
-                                   malloc_size, allocated_memory[i], malloc_end_addr);
-            } else {
-                offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
-                                   "Thread %ld failed to allocate %zu bytes on malloc %d\n",
-                                   thread_id, malloc_size, i);
-            }
         }
     }
 
@@ -90,12 +118,7 @@ void* thread_function(void* arg) {
     }
 
     if (allocated_memory != NULL) {
-        for (int i = 0; i < malloc_count; i++) {
-            if (allocated_memory[i] != NULL) {
-                free(allocated_memory[i]);
-            }
-        }
-        free(allocated_memory);
+        malloc_deallocate_function(&allocated_memory);
     }
 
     return NULL;
@@ -112,9 +135,18 @@ void print_usage(const char *program_name) {
     printf("  -h, --help                                Show this help message\n");
 }
 
-int main(int argc, char *argv[]) {
-    int num_threads = DEFAULT_NUM_THREADS;
-    size_t stack_size = 0;
+void setup_signal_handler() {
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+}
+
+void parse_arguments(int *argc, char **argv[]) {
+    int opt;
+    int option_index = 0;
+    extern int optind;
 
     // Define the options
     static struct option long_options[] = {
@@ -127,16 +159,12 @@ int main(int argc, char *argv[]) {
         {0, 0, 0, 0}
     };
 
-    int opt;
-    int option_index = 0;
-    extern int optind;
-
-    while ((opt = getopt_long(argc, argv, "n:s:m:f:c:h", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(*argc, *argv, "n:s:m:f:c:h", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'n':
                 if (sscanf(optarg, "%d", &num_threads) != 1 || num_threads <= 0) {
                     fprintf(stderr, "Invalid number of threads: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -144,7 +172,7 @@ int main(int argc, char *argv[]) {
                 stack_size_given = 1;
                 if (sscanf(optarg, "%zu", &stack_size) != 1 || stack_size < (size_t)PTHREAD_STACK_MIN) {
                     fprintf(stderr, "Invalid stack size: %s. Must be at least %ld bytes.\n", optarg, PTHREAD_STACK_MIN);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -153,7 +181,7 @@ int main(int argc, char *argv[]) {
                 malloc_fill_enabled = 0;
                 if (sscanf(optarg, "%zu", &malloc_size) != 1 || malloc_size <= 0) {
                     fprintf(stderr, "Invalid malloc size: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -162,65 +190,76 @@ int main(int argc, char *argv[]) {
                 malloc_fill_enabled = 1;
                 if (sscanf(optarg, "%zu", &malloc_size) != 1 || malloc_size <= 0) {
                     fprintf(stderr, "Invalid malloc size: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
             case 'c':
                 if (sscanf(optarg, "%d", &malloc_count) != 1 || malloc_count <= 0) {
                     fprintf(stderr, "Invalid count of mallocs: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
             case 'h':
-                print_usage(argv[0]);
+                print_usage(*argv[0]);
                 exit(EXIT_SUCCESS);
             default:
-                print_usage(argv[0]);
+                print_usage(*argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
     // Check if there are any non-option arguments left
-    if (optind < argc) {
+    if (optind < *argc) {
         fprintf(stderr, "Unknown argument(s): ");
-        while (optind < argc) {
-            fprintf(stderr, "%s ", argv[optind++]);
+        while (optind < *argc) {
+            fprintf(stderr, "%s ", *argv[optind++]);
         }
         fprintf(stderr, "\n");
-        print_usage(argv[0]);
+        print_usage(*argv[0]);
         exit(EXIT_FAILURE);
     }
+}
 
-    pthread_t threads[num_threads];
-    pthread_attr_t attr;
-
-    // Initialize thread attribute
-    pthread_attr_init(&attr);
+void set_stack_size(pthread_attr_t *attr) {
     if (stack_size_given) {
-        if (pthread_attr_setstacksize(&attr, stack_size) != 0) {
+        if (pthread_attr_setstacksize(&*attr, stack_size) != 0) {
             fprintf(stderr, "Error setting stack size (%zu bytes). Using system default stack size.\n", stack_size);
         }
     }
+}
 
-    // Set up signal handler for SIGINT
-    struct sigaction sa;
-    sa.sa_handler = handle_sigint;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGINT, &sa, NULL);
+int create_threads(pthread_t *threads) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
 
-    // Create threads
+    set_stack_size(&attr);
+
     for (long i = 0; i < num_threads; i++) {
         if (pthread_create(&threads[i], &attr, thread_function, (void*)i) != 0) {
             perror("pthread_create");
             pthread_attr_destroy(&attr);
-            exit(EXIT_FAILURE);
+            return -1;
         }
     }
 
     pthread_attr_destroy(&attr);
+
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+
+    setup_signal_handler();
+
+    parse_arguments(&argc, &argv);
+
+    pthread_t threads[num_threads];
+
+    if (create_threads(threads) != 0) {
+        exit(EXIT_FAILURE);
+    }
 
     sleep(3);
     printf("#################################\n");
@@ -228,12 +267,10 @@ int main(int argc, char *argv[]) {
     printf("Program running. Press Ctrl+C to exit.\n");
     printf("#################################\n");
 
-    // Wait until Ctrl+C is pressed
     while (running) {
         sleep(1);
     }
 
-    // Wait for all threads to finish
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
