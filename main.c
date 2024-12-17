@@ -136,7 +136,6 @@ void print_usage(const char *program_name) {
 }
 
 void setup_signal_handler() {
-    // Set up signal handler for SIGINT
     struct sigaction sa;
     sa.sa_handler = handle_sigint;
     sa.sa_flags = 0;
@@ -223,16 +222,19 @@ void parse_arguments(int *argc, char **argv[]) {
     }
 }
 
-int create_threads(pthread_t *threads) {
-    pthread_attr_t attr;
-
-    // Initialize thread attribute
-    pthread_attr_init(&attr);
+void set_stack_size(pthread_attr_t *attr) {
     if (stack_size_given) {
-        if (pthread_attr_setstacksize(&attr, stack_size) != 0) {
+        if (pthread_attr_setstacksize(&*attr, stack_size) != 0) {
             fprintf(stderr, "Error setting stack size (%zu bytes). Using system default stack size.\n", stack_size);
         }
     }
+}
+
+int create_threads(pthread_t *threads) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+
+    set_stack_size(&attr);
 
     for (long i = 0; i < num_threads; i++) {
         if (pthread_create(&threads[i], &attr, thread_function, (void*)i) != 0) {
@@ -243,6 +245,7 @@ int create_threads(pthread_t *threads) {
     }
 
     pthread_attr_destroy(&attr);
+
     return 0;
 }
 
