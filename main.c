@@ -223,13 +223,7 @@ void parse_arguments(int *argc, char **argv[]) {
     }
 }
 
-int main(int argc, char *argv[]) {
-
-    setup_signal_handler();
-
-    parse_arguments(&argc, &argv);
-
-    pthread_t threads[num_threads];
+int create_threads(pthread_t *threads) {
     pthread_attr_t attr;
 
     // Initialize thread attribute
@@ -240,16 +234,29 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Create threads
     for (long i = 0; i < num_threads; i++) {
         if (pthread_create(&threads[i], &attr, thread_function, (void*)i) != 0) {
             perror("pthread_create");
             pthread_attr_destroy(&attr);
-            exit(EXIT_FAILURE);
+            return -1;
         }
     }
 
     pthread_attr_destroy(&attr);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+
+    setup_signal_handler();
+
+    parse_arguments(&argc, &argv);
+
+    pthread_t threads[num_threads];
+
+    if (create_threads(threads) != 0) {
+        exit(EXIT_FAILURE);
+    }
 
     sleep(3);
     printf("#################################\n");
@@ -257,12 +264,10 @@ int main(int argc, char *argv[]) {
     printf("Program running. Press Ctrl+C to exit.\n");
     printf("#################################\n");
 
-    // Wait until Ctrl+C is pressed
     while (running) {
         sleep(1);
     }
 
-    // Wait for all threads to finish
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
