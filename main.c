@@ -20,6 +20,9 @@ int malloc_fill_enabled = 0;
 size_t malloc_size = 0;
 int stack_size_given = 0;
 int malloc_count = DEFAULT_MALLOC_COUNT;
+int num_threads = DEFAULT_NUM_THREADS;
+size_t stack_size = 0;
+
 
 // Signal handler to handle Ctrl+C (SIGINT)
 void handle_sigint(int sig) {
@@ -132,9 +135,10 @@ void print_usage(const char *program_name) {
     printf("  -h, --help                                Show this help message\n");
 }
 
-int main(int argc, char *argv[]) {
-    int num_threads = DEFAULT_NUM_THREADS;
-    size_t stack_size = 0;
+void parse_arguments(int *argc, char **argv[]) {
+    int opt;
+    int option_index = 0;
+    extern int optind;
 
     // Define the options
     static struct option long_options[] = {
@@ -147,16 +151,12 @@ int main(int argc, char *argv[]) {
         {0, 0, 0, 0}
     };
 
-    int opt;
-    int option_index = 0;
-    extern int optind;
-
-    while ((opt = getopt_long(argc, argv, "n:s:m:f:c:h", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(*argc, *argv, "n:s:m:f:c:h", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'n':
                 if (sscanf(optarg, "%d", &num_threads) != 1 || num_threads <= 0) {
                     fprintf(stderr, "Invalid number of threads: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -164,7 +164,7 @@ int main(int argc, char *argv[]) {
                 stack_size_given = 1;
                 if (sscanf(optarg, "%zu", &stack_size) != 1 || stack_size < (size_t)PTHREAD_STACK_MIN) {
                     fprintf(stderr, "Invalid stack size: %s. Must be at least %ld bytes.\n", optarg, PTHREAD_STACK_MIN);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -173,7 +173,7 @@ int main(int argc, char *argv[]) {
                 malloc_fill_enabled = 0;
                 if (sscanf(optarg, "%zu", &malloc_size) != 1 || malloc_size <= 0) {
                     fprintf(stderr, "Invalid malloc size: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -182,36 +182,41 @@ int main(int argc, char *argv[]) {
                 malloc_fill_enabled = 1;
                 if (sscanf(optarg, "%zu", &malloc_size) != 1 || malloc_size <= 0) {
                     fprintf(stderr, "Invalid malloc size: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
             case 'c':
                 if (sscanf(optarg, "%d", &malloc_count) != 1 || malloc_count <= 0) {
                     fprintf(stderr, "Invalid count of mallocs: %s. Must be a positive integer.\n", optarg);
-                    print_usage(argv[0]);
+                    print_usage(*argv[0]);
                     exit(EXIT_FAILURE);
                 }
                 break;
             case 'h':
-                print_usage(argv[0]);
+                print_usage(*argv[0]);
                 exit(EXIT_SUCCESS);
             default:
-                print_usage(argv[0]);
+                print_usage(*argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
     // Check if there are any non-option arguments left
-    if (optind < argc) {
+    if (optind < *argc) {
         fprintf(stderr, "Unknown argument(s): ");
-        while (optind < argc) {
-            fprintf(stderr, "%s ", argv[optind++]);
+        while (optind < *argc) {
+            fprintf(stderr, "%s ", *argv[optind++]);
         }
         fprintf(stderr, "\n");
-        print_usage(argv[0]);
+        print_usage(*argv[0]);
         exit(EXIT_FAILURE);
     }
+}
+
+int main(int argc, char *argv[]) {
+
+    parse_arguments(&argc, &argv);
 
     pthread_t threads[num_threads];
     pthread_attr_t attr;
