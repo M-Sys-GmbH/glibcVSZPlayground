@@ -187,7 +187,7 @@ int get_stack_info(void **stack_addr, size_t *stack_size, void **stack_end_addr)
     return 0;
 }
 
-void** malloc_allocate_function(long thread_id, struct malloc_info_entry *entries, char *output_buffer, int *offset) {
+void** malloc_allocate_function(long thread_id, struct malloc_info_entry *entries) {
     void **allocated_memory = malloc(malloc_count * sizeof(void*));
     if (allocated_memory == NULL) {
         fprintf(stderr, "Thread %ld failed to allocate memory for malloc pointers\n", thread_id);
@@ -201,16 +201,10 @@ void** malloc_allocate_function(long thread_id, struct malloc_info_entry *entrie
                 memset(allocated_memory[i], 0xAA, malloc_size);
             }
             void *malloc_end_addr = (char *)allocated_memory[i] + malloc_size;
-            *offset += snprintf(output_buffer + *offset, sizeof(output_buffer) - *offset,
-                               "\tAllocated %zu bytes at address %p to %p\n",
-                               malloc_size, allocated_memory[i], malloc_end_addr);
             entries[i].malloc_start_address = (unsigned long long) allocated_memory[i];
             entries[i].malloc_size = malloc_size;
             entries[i].malloc_end_address = (unsigned long long) malloc_end_addr;
         } else {
-            *offset += snprintf(output_buffer + *offset, sizeof(output_buffer) - *offset,
-                               "Thread %ld failed to allocate %zu bytes on malloc %d\n",
-                               thread_id, malloc_size, i);
             entries[i].malloc_start_address = 0;
             entries[i].malloc_size = 0;
             entries[i].malloc_end_address = 0;
@@ -231,26 +225,15 @@ void malloc_deallocate_function(void **allocated_memory) {
 
 void* thread_function(void *arg) {
     struct thread_info_entry *tinfo = (struct thread_info_entry *)arg;
-
-    char output_buffer[40960];
-    int offset = 0;
-
     long thread_id = tinfo->thread_id;
-    pid_t tid = syscall(SYS_gettid);
-
     void *stack_addr = NULL;
     size_t stack_size;
     void *stack_end_addr = NULL;
-
     void **allocated_memory = NULL;
 
     if (get_stack_info(&stack_addr, &stack_size, &stack_end_addr) != 0) {
         return NULL;
     }
-
-    offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
-                       "Thread %ld started. TID: %d, Stack Address: %p, Stack End Address: %p, Stack Size: %zu bytes\n",
-                       thread_id, tid, stack_addr, stack_end_addr, stack_size);
 
     // Thread Info Entry Init
     tinfo->thread_id = thread_id;
@@ -266,14 +249,11 @@ void* thread_function(void *arg) {
     }
 
     if (malloc_enabled) {
-        allocated_memory = malloc_allocate_function(thread_id, tinfo->malloc_info_entries, output_buffer, &offset);
+        allocated_memory = malloc_allocate_function(thread_id, tinfo->malloc_info_entries);
         if (!allocated_memory) {
             return NULL;
         }
     }
-
-    // Print all thread information in one go
-    printf("%s", output_buffer);
 
     tinfo->finished = 1;
 
@@ -298,14 +278,6 @@ void print_usage(const char *program_name) {
     printf("  -f, --malloc-filled-inside-thread <size>  Allocate memory inside each thread and fill with 0xAA\n");
     printf("  -c, --count-of-mallocs <number>           Number of malloc calls inside each thread (default: %d)\n", DEFAULT_MALLOC_COUNT);
     printf("  -h, --help                                Show this help message\n");
-}
-
-void setup_signal_handler() {
-    struct sigaction sa;
-    sa.sa_handler = handle_sigint;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGINT, &sa, NULL);
 }
 
 void parse_arguments(int *argc, char *argv[]) {
@@ -440,7 +412,10 @@ struct pmap_entry *get_pmap_analysis(int pid, int *count) {
     return entries;
 }
 
-void join_threads(pthread_t *threads) {
+void stop_threads(pthread_t *threads) {
+    // Set stop signal for threads
+    running = 0;
+
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
@@ -458,8 +433,6 @@ void free_thread_info_entries(struct thread_info_entry *entries) {
 }
 
 int main(int argc, char *argv[]) {
-
-    setup_signal_handler();
 
     parse_arguments(&argc, argv);
 
@@ -486,9 +459,7 @@ int main(int argc, char *argv[]) {
 
     print_pmap_entries(pmap_entries, pmap_entry_count);
 
-    running = 0;
-
-    join_threads(threads);
+    stop_threads(threads);
 
     free_thread_info_entries(thread_info_entries);
     free(pmap_entries);
