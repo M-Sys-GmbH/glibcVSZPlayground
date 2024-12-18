@@ -13,6 +13,9 @@
 
 #define DEFAULT_NUM_THREADS 20
 #define DEFAULT_MALLOC_COUNT 1
+#define PMAP_INITIAL_CAPACITY 50
+#define PMAP_MAX_MAPPING_PATH 1024
+#define PMAP_MAX_ADDRESS_LEN  64
 
 volatile sig_atomic_t running = 1;
 int malloc_enabled = 0;
@@ -22,6 +25,17 @@ int stack_size_given = 0;
 int malloc_count = DEFAULT_MALLOC_COUNT;
 int num_threads = DEFAULT_NUM_THREADS;
 size_t stack_size = 0;
+
+struct pmap_entry {
+    unsigned long long start_address;
+    int kbytes;
+    int rss;
+    int dirty;
+    char r;
+    char w;
+    char x;
+    char mapping[PMAP_MAX_MAPPING_PATH];
+};
 
 struct malloc_info_entry {
     unsigned long long malloc_start_address;
@@ -39,6 +53,116 @@ struct thread_info_entry {
     size_t malloc_entry_count;
     int finished;
 };
+
+FILE *execute_pmap_cmd(int pid) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "pmap -x %d", pid);
+
+    FILE *fp = popen(cmd, "r");
+    if (fp == NULL) {
+        perror("popen");
+        return NULL;
+    }
+    return fp;
+}
+
+static struct pmap_entry *resize_entries(struct pmap_entry *entries, int *capacity) {
+    *capacity *= 2;
+    struct pmap_entry *new_entries = realloc(entries, sizeof(struct pmap_entry) * (*capacity));
+    if (!new_entries) {
+        perror("realloc");
+        free(entries);
+        return NULL;
+    }
+    return new_entries;
+}
+
+static struct pmap_entry *parse_pmap_output(FILE *fp, int *count) {
+    int capacity = PMAP_INITIAL_CAPACITY;
+    struct pmap_entry *entries = malloc(sizeof(struct pmap_entry) * capacity);
+    if (!entries) {
+        fprintf(stderr, "Malloc pmap entries failed!\n");
+        return NULL;
+    }
+
+    char line[1024];
+    *count = 0;
+
+    // Skip header line
+    if (fgets(line, sizeof(line), fp) == NULL) {
+        fprintf(stderr, "No output from pmap.\n");
+        free(entries);
+        return NULL;
+    }
+
+    // Parse each subsequent line
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        // If we are out of space, realloc
+        if (*count >= capacity) {
+            entries = resize_entries(entries, &capacity);
+            if (!entries) {
+                return NULL;
+            }
+        }
+
+        char address[PMAP_MAX_ADDRESS_LEN];
+        int kbytes, rss, dirty;
+        char mode[8];
+        char mapping[PMAP_MAX_MAPPING_PATH];
+        mapping[0] = '\0';
+
+        int fields = sscanf(line, "%63s %d %d %d %7s %1023[^\n]",
+                            address, &kbytes, &rss, &dirty, mode, mapping);
+        if (fields < 5) {
+            continue; // skip malformed lines
+        }
+
+        // Convert address
+        unsigned long long start_address = strtoull(address, NULL, 16);
+
+        // Break down mode
+        char r = (mode[0] == 'r') ? 'r' : '-';
+        char w = (mode[1] == 'w') ? 'w' : '-';
+        char x = (mode[2] == 'x') ? 'x' : '-';
+
+        // Fill in the struct
+        entries[*count].start_address = start_address;
+        entries[*count].kbytes = kbytes;
+        entries[*count].rss = rss;
+        entries[*count].dirty = dirty;
+        entries[*count].r = r;
+        entries[*count].w = w;
+        entries[*count].x = x;
+        if (fields == 6) {
+            // Trim leading spaces from mapping if any
+            char *m = mapping;
+            while (*m == ' ') m++;
+            strncpy(entries[*count].mapping, m, PMAP_MAX_MAPPING_PATH);
+            entries[*count].mapping[PMAP_MAX_MAPPING_PATH - 1] = '\0';
+        } else {
+            entries[*count].mapping[0] = '\0';
+        }
+
+        (*count)++;
+    }
+    return entries;
+}
+
+void print_pmap_entries(struct pmap_entry *entries, int count) {
+    printf("%-12s %8s %8s %8s %s%s%s %s\n",
+           "Address", "Kbytes", "RSS", "Dirty", "R", "W", "X", "Mapping");
+    for (int i = 0; i < count; i++) {
+        printf("%llx %8d %8d %8d %c%c%c %s\n",
+               entries[i].start_address,
+               entries[i].kbytes,
+               entries[i].rss,
+               entries[i].dirty,
+               entries[i].r,
+               entries[i].w,
+               entries[i].x,
+               entries[i].mapping);
+    }
+}
 
 void handle_sigint(int sig) {
     (void)sig;
@@ -300,6 +424,22 @@ void wait_for_threads_to_finish(struct thread_info_entry *entries) {
     }
 }
 
+struct pmap_entry *get_pmap_analysis(int pid, int *count) {
+    FILE *fp = execute_pmap_cmd(pid);
+    if (!fp) {
+        return NULL;
+    }
+
+    struct pmap_entry *entries = parse_pmap_output(fp, count);
+
+    pclose(fp);
+
+    if (!entries) {
+        return NULL;
+    }
+    return entries;
+}
+
 void join_threads(pthread_t *threads) {
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
@@ -332,24 +472,26 @@ int main(int argc, char *argv[]) {
     pthread_t threads[num_threads];
 
     if (create_threads(threads, thread_info_entries) != 0) {
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     wait_for_threads_to_finish(thread_info_entries);
 
-    printf("#################################\n");
-    printf("Program PID: %d\n", getpid());
-    printf("Program running. Press Ctrl+C to exit.\n");
-    printf("#################################\n");
-
-    while (running) {
-        sleep(1);
+    int pmap_entry_count = 0;
+    struct pmap_entry *pmap_entries = get_pmap_analysis(getpid(), &pmap_entry_count);
+    if (!pmap_entries) {
+        free_thread_info_entries(thread_info_entries);
+        return EXIT_FAILURE;
     }
+
+    print_pmap_entries(pmap_entries, pmap_entry_count);
+
+    running = 0;
 
     join_threads(threads);
 
     free_thread_info_entries(thread_info_entries);
+    free(pmap_entries);
 
-    printf("All threads have exited. Program terminating.\n");
     return 0;
 }
