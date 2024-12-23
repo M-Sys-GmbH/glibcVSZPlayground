@@ -11,6 +11,12 @@
 #include <getopt.h>
 #include <limits.h>
 
+# if __WORDSIZE == 32
+#  define GLIBC_ARENA_SIZE_IN_KBYTES 512
+# else
+#  define GLIBC_ARENA_SIZE_IN_KBYTES (2 * 4 * 1024 * sizeof(long))
+# endif
+
 #define DEFAULT_NUM_THREADS 20
 #define DEFAULT_MALLOC_COUNT 1
 #define PMAP_INITIAL_CAPACITY 50
@@ -53,6 +59,11 @@ struct thread_info_entry {
     size_t malloc_entry_count;
     int finished;
 };
+
+static int ranges_overlap(unsigned long long start1, unsigned long long end1,
+                          unsigned long long start2, unsigned long long end2) {
+    return (start1 < end2) && (end1 > start2);
+}
 
 FILE *execute_pmap_cmd(int pid) {
     char cmd[128];
@@ -148,25 +159,108 @@ static struct pmap_entry *parse_pmap_output(FILE *fp, int *count) {
     return entries;
 }
 
-void print_pmap_entries(struct pmap_entry *entries, int count) {
-    printf("%-12s %8s %8s %8s %s%s%s %s\n",
-           "Address", "Kbytes", "RSS", "Dirty", "R", "W", "X", "Mapping");
-    for (int i = 0; i < count; i++) {
-        printf("%llx %8d %8d %8d %c%c%c %s\n",
-               entries[i].start_address,
-               entries[i].kbytes,
-               entries[i].rss,
-               entries[i].dirty,
-               entries[i].r,
-               entries[i].w,
-               entries[i].x,
-               entries[i].mapping);
+int check_pmap_entry_type(struct pmap_entry *p_current, struct pmap_entry *p_before, struct pmap_entry *p_after, struct thread_info_entry *thread_entries, int thread_entry_count) {
+    if (p_after) {
+        if (p_current->start_address + 0x200000000000 < p_after->start_address) {
+            printf("---------------- Main Thread - HEAP ---------------\n");
+            return 1;
+        }
+
+        // Thread Arena Check - Part 1
+        if (GLIBC_ARENA_SIZE_IN_KBYTES == p_current->kbytes + p_after->kbytes && p_current->r == 'r') {
+            printf("---------------- Thread Arena - HEAP --------------\n");
+        }
+    }
+
+    if (p_before) {
+        // Thread Arena Check - Part 2
+        if (GLIBC_ARENA_SIZE_IN_KBYTES == p_current->kbytes + p_before->kbytes && p_current->r == '-') {
+            return 1;
+        }
+    }
+
+    // Thread Stack Check
+    for (int i = 0; i < thread_entry_count; i++) {
+        struct thread_info_entry t_entry = thread_entries[i];
+        unsigned long long pmap_start = p_current->start_address;
+        unsigned long long pmap_end = p_current->start_address + (p_current->kbytes * 1024ULL);
+
+        if (ranges_overlap(pmap_start, pmap_end, 
+                           t_entry.stack_start_address, t_entry.stack_end_address)) {
+            printf("---------------- Thread %ld - STACK ---------------\n", t_entry.thread_id);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void print_pmap_entry(struct pmap_entry p_entry) {
+    printf("%llx %8d %8d %8d %c%c%c %s\n",
+           p_entry.start_address,
+           p_entry.kbytes,
+           p_entry.rss,
+           p_entry.dirty,
+           p_entry.r,
+           p_entry.w,
+           p_entry.x,
+           p_entry.mapping);
+}
+
+void print_malloc_entries(struct thread_info_entry thread_entry, unsigned long long pmap_start, unsigned long long pmap_end) {
+    for (size_t j = 0; j < thread_entry.malloc_entry_count; j++) {
+        if (ranges_overlap(pmap_start, pmap_end,
+                           thread_entry.malloc_info_entries[j].malloc_start_address,
+                           thread_entry.malloc_info_entries[j].malloc_end_address)) {
+            printf("    Thread %ld (TID: %d)", thread_entry.thread_id, thread_entry.tid);
+            size_t alloc_size = thread_entry.malloc_info_entries[j].malloc_size;
+            printf(" - Malloc #%ld: [0x%llx - 0x%llx] (size: %zu bytes)\n",
+                   j+1,
+                   thread_entry.malloc_info_entries[j].malloc_start_address,
+                   thread_entry.malloc_info_entries[j].malloc_end_address,
+                   alloc_size);
+        }
     }
 }
 
-void handle_sigint(int sig) {
-    (void)sig;
-    running = 0;
+void create_output(struct pmap_entry *pmap_entries, int pmap_entry_count, struct thread_info_entry *thread_entries, int thread_entry_count) {
+    printf("%-12s %8s %8s %8s %s%s%s %s\n",
+           "Address", "Kbytes", "RSS", "Dirty", "R", "W", "X", "Mapping");
+    printf("---------------------------------------------------\n");
+    for (int m = 0; m < pmap_entry_count; m++) {
+        struct pmap_entry *p_current = &pmap_entries[m];
+        struct pmap_entry *p_before = NULL;
+        struct pmap_entry *p_after = NULL;
+        int endline_needed = 0;
+
+        if (m + 1 < pmap_entry_count)
+            p_after = &pmap_entries[m+1];
+        if (m - 1 > 0)
+            p_before = &pmap_entries[m-1];
+
+        endline_needed = check_pmap_entry_type(p_current, p_before, p_after, thread_entries, thread_entry_count);
+
+        print_pmap_entry(*p_current);
+
+        for (int i = 0; i < thread_entry_count; i++) {
+            struct thread_info_entry t_entry = thread_entries[i];
+            unsigned long long pmap_start = p_current->start_address;
+            unsigned long long pmap_end = p_current->start_address + (p_current->kbytes * 1024ULL);
+
+            if (ranges_overlap(pmap_start, pmap_end, 
+                               t_entry.stack_start_address, t_entry.stack_end_address)) {
+                printf("    Thread %ld (TID: %d)", t_entry.thread_id, t_entry.tid);
+                printf(" - Stack: [0x%llx - 0x%llx] (size: %zu bytes)\n", 
+                       t_entry.stack_start_address, 
+                       t_entry.stack_end_address, 
+                       t_entry.stack_size);
+            }
+            print_malloc_entries(t_entry, pmap_start, pmap_end);
+        }
+
+        if (endline_needed) {
+            printf("---------------------------------------------------\n");
+        }
+    }
 }
 
 int get_stack_info(void **stack_addr, size_t *stack_size, void **stack_end_addr) {
@@ -241,8 +335,6 @@ void* thread_function(void *arg) {
     tinfo->stack_start_address = (unsigned long long) stack_addr;
     tinfo->stack_size = stack_size;
     tinfo->stack_end_address = (unsigned long long) stack_end_addr;
-    tinfo->malloc_entry_count = malloc_count;
-    tinfo->malloc_info_entries = malloc(sizeof(struct malloc_info_entry) * tinfo->malloc_entry_count);
     if (tinfo->malloc_entry_count > 0 && tinfo->malloc_info_entries == NULL) {
         fprintf(stderr, "Thread %ld failed to allocate memory for thread_info_entry pointerrs\n", thread_id);
         return NULL;
@@ -376,6 +468,9 @@ int create_threads(pthread_t *threads, struct thread_info_entry *entry) {
     for (long i = 0; i < num_threads; i++) {
         entry[i].thread_id = i;
         entry[i].finished = 0;
+        entry[i].malloc_entry_count = malloc_count;
+        entry[i].malloc_info_entries = malloc(sizeof(struct malloc_info_entry) * entry[i].malloc_entry_count);
+
         if (pthread_create(&threads[i], &attr, thread_function, (void*)&entry[i]) != 0) {
             perror("pthread_create");
             pthread_attr_destroy(&attr);
@@ -432,6 +527,7 @@ void free_thread_info_entries(struct thread_info_entry *entries) {
     entries = NULL;
 }
 
+
 int main(int argc, char *argv[]) {
 
     parse_arguments(&argc, argv);
@@ -457,7 +553,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    print_pmap_entries(pmap_entries, pmap_entry_count);
+    create_output(pmap_entries, pmap_entry_count, thread_info_entries, num_threads);
 
     stop_threads(threads);
 
