@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <getopt.h>
 #include <limits.h>
+#include <malloc.h>
 
 # if __WORDSIZE == 32
 #  define GLIBC_ARENA_SIZE_IN_KBYTES 512
@@ -361,6 +362,22 @@ void* thread_function(void *arg) {
     return NULL;
 }
 
+int set_malloc_arena_number(int count) {
+    if (mallopt(M_ARENA_MAX, count) == 0) {
+        fprintf(stderr, "ERROR while trying to set MALLOC_ARENA_MAX\n");
+        return 1;
+    }
+    return 0;
+}
+
+int set_malloc_mmap_threshold_in_bytes(size_t size) {
+    if (mallopt(M_MMAP_THRESHOLD, size) == 0) {
+        fprintf(stderr, "ERROR while trying to set M_MMAP_THRESHOLD\n");
+        return 1;
+    }
+    return 0;
+}
+
 void print_usage(const char *program_name) {
     printf("Usage: %s [options]\n", program_name);
     printf("Options:\n");
@@ -369,6 +386,8 @@ void print_usage(const char *program_name) {
     printf("  -m, --malloc-sparse-inside-thread <size>  Allocate memory inside each thread without initialization\n");
     printf("  -f, --malloc-filled-inside-thread <size>  Allocate memory inside each thread and fill with 0xAA\n");
     printf("  -c, --count-of-mallocs <number>           Number of malloc calls inside each thread (default: %d)\n", DEFAULT_MALLOC_COUNT);
+    printf("  -a, --malloc-arena-max <size>             Set number of arenas via MALLOC_ARENA_MAX (default: depends on arch and cpu core count)\n");
+    printf("  -t, --mmap-threshold <size>               Set threshold number of bytes by which memory allocations are done via mmap instead of using heap/arenas (default: 131072)\n");
     printf("  -h, --help                                Show this help message\n");
 }
 
@@ -384,11 +403,13 @@ void parse_arguments(int *argc, char *argv[]) {
         {"malloc-sparse-inside-thread", required_argument, 0, 'm'},
         {"malloc-filled-inside-thread", required_argument, 0, 'f'},
         {"count-of-mallocs", required_argument, 0, 'c'},
+        {"malloc-arena-max", required_argument, 0, 'a'},
+        {"mmap-threshold", required_argument, 0, 't'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(*argc, argv, "n:s:m:f:c:h", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(*argc, argv, "n:s:m:f:c:a:t:h", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'n':
                 if (sscanf(optarg, "%d", &num_threads) != 1 || num_threads <= 0) {
@@ -429,6 +450,26 @@ void parse_arguments(int *argc, char *argv[]) {
                     print_usage(argv[0]);
                     exit(EXIT_FAILURE);
                 }
+                break;
+            case 'a':
+                int arenas = 0;
+                if (sscanf(optarg, "%d", &arenas) != 1 || arenas <= 0) {
+                    fprintf(stderr, "Invalid number of arenas: %s. Must be a positive integer.\n", optarg);
+                    print_usage(argv[0]);
+                    exit(EXIT_FAILURE);
+                }
+                if (set_malloc_arena_number(arenas) != 0)
+                    exit(EXIT_FAILURE);
+                break;
+            case 't':
+                int mmap_threshold = 0;
+                if (sscanf(optarg, "%d", &mmap_threshold) != 1 || mmap_threshold <= 0) {
+                    fprintf(stderr, "Invalid size of mmap threshold: %s. Must be a positive integer.\n", optarg);
+                    print_usage(argv[0]);
+                    exit(EXIT_FAILURE);
+                }
+                if (set_malloc_mmap_threshold_in_bytes(mmap_threshold) != 0)
+                    exit(EXIT_FAILURE);
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -526,7 +567,6 @@ void free_thread_info_entries(struct thread_info_entry *entries) {
     free(entries);
     entries = NULL;
 }
-
 
 int main(int argc, char *argv[]) {
 
