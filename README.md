@@ -1,14 +1,16 @@
 # Testing Program for glibc's pthreads and malloc()
 
 In a project we had the task to investigate the high VSZ (Virtual Memory Size) usage on an embedded Linux system.
-The software the client put on the embedded Linux device was highly multithreaded, it turned out that there were 2 reasons:
+The software the client put on the embedded Linux device was highly multithreaded, it turned out that there were 2 reasons for the high VSZ:
 - pthread stack size for each thread
-- thread arenas created by malloc() calls within the thread functions
+- glibc (thread) arenas created by malloc() calls within the thread functions
+
+With the cli tool **pmap**, one can display the memory map of a process with all sections and the corresponding addresses and some additional information. We found, that to get an better understanding of the way of working the output needs some extra information.
+So we created this testing/playing tool, which creates a number of threads an allocates/deallocates memory inside the threads and prints an pmap like result, but will tell which heap & stack of which thread is where.
 
 ## pthread Stack Size
 
 ## malloc() ThreadArenas
-
 
 ## Usage
 ```
